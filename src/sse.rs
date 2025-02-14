@@ -55,6 +55,7 @@ async fn receive_events(
         let frame = next?;
         if let Some(chunk) = frame.data_ref() {
             let mut chunk = &**chunk;
+            tracing::debug!("Received chunk: `{}`", String::from_utf8_lossy(chunk));
 
             // We split on double newlines, respecting the accumulation buffer.
             let mut i = 0;
@@ -70,7 +71,7 @@ async fn receive_events(
                     );
 
                     let mut staging = String::new();
-                    let mut data = String::new();
+                    let mut data = None;
                     let mut event = String::new();
                     loop {
                         let mut header = [0u8; 4];
@@ -85,10 +86,12 @@ async fn receive_events(
                                 message.read_exact(&mut header_colon)?;
                                 assert_eq!(&header_colon, b": ");
 
-                                message.read_line(&mut data)?;
-                                if data.ends_with('\n') {
-                                    data.pop(); // Remove the trailing newline.
+                                let mut data_line = String::new();
+                                message.read_line(&mut data_line)?;
+                                if data_line.ends_with('\n') {
+                                    data_line.pop(); // Remove the trailing newline.
                                 }
+                                data = Some(data_line);
                             }
                             b"even" => {
                                 // Last 3 bytes
@@ -106,6 +109,10 @@ async fn receive_events(
                             }
                         }
                     }
+
+                    let Some(data) = data.take() else {
+                        continue;
+                    };
 
                     let value = serde_json::from_str(&data)?;
                     if let Err(_) = tx.send(Ok(SseValue { event, value })) {
@@ -176,6 +183,8 @@ async fn run_client(
         )
         .into());
     }
+
+    tracing::debug!("sse opened successfully");
 
     select! {
         _ = receive_events(res, tx) => {

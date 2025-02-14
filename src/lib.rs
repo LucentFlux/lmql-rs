@@ -1,13 +1,12 @@
 pub mod llms;
 mod sse;
 
-pub use lmql_macros::*;
-
 pub const DEFAULT_MAX_TOKENS: usize = 4096;
 pub const DEFAULT_TEMPERATURE: f32 = 1.0;
 
-#[macro_export]
-macro_rules! prompt {
+//pub use lmql_macros::*;
+//#[macro_export]
+/*macro_rules! prompt {
     ($model:expr => $(
         user: $prompt:literal;
         assistant: $response:literal $(where $($out:ident : $out_ty:ty),* $(,)?)?
@@ -29,7 +28,7 @@ macro_rules! prompt {
 
         res
     }};
-}
+}*/
 
 #[derive(Debug, thiserror::Error)]
 pub enum PromptError {

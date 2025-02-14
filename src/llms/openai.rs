@@ -93,20 +93,12 @@ impl crate::LLM for Gpt {
             content: &'a str,
         }
 
-        fn is_one(v: &f32) -> bool {
-            *v == 1.0
-        }
-
         #[derive(Debug, serde::Serialize)]
         struct GptRequest<'a> {
             model: GptModel,
             max_tokens: usize,
-            #[serde(skip_serializing_if = "is_one")]
             temperature: f32,
-            #[serde(skip_serializing_if = "std::ops::Not::not")]
             stream: bool,
-            #[serde(skip_serializing_if = "Vec::is_empty")]
-            stop_sequences: Vec<String>,
             messages: Vec<GptMessage<'a>>,
         }
 
@@ -127,7 +119,6 @@ impl crate::LLM for Gpt {
             model: self.model,
             max_tokens: options.max_tokens,
             temperature: options.temperature,
-            stop_sequences: options.stopping_sequences,
             stream: true,
             messages,
         };
@@ -238,7 +229,7 @@ impl futures::Stream for GptTokenStream {
                     return std::task::Poll::Ready(None);
                 }
                 other => tracing::error!(
-                    "unexpected anthropic event: `{other}` with value {:#?}",
+                    "unexpected openai event: `{other}` with value {:#?}",
                     message.value
                 ),
             }

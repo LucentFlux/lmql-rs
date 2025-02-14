@@ -22,3 +22,12 @@ async fn openai_stream() {
         println!("{:?}", token.unwrap());
     }
 }
+
+#[tokio::test]
+async fn openrouter_stream() {
+    let gpt = lmql::llms::openrouter::OpenRouter::new_from_env("deepseek/deepseek-r1");
+    let mut stream = gpt.prompt(&["Hello!"], PromptOptions::default()).unwrap();
+    while let Some(token) = stream.next().await {
+        println!("{:?}", token.unwrap());
+    }
+}

@@ -4,7 +4,6 @@
 use std::io::{BufRead, Read};
 use std::sync::Arc;
 
-use futures::StreamExt;
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::{Request, Response};

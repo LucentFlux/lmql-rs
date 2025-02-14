@@ -102,6 +102,34 @@ pub trait LLM {
     ) -> Result<Self::TokenStream<'a>, PromptError>;
 }
 
+mod sealed {
+    pub trait TokenStreamExtSealed {}
+    impl<T> TokenStreamExtSealed for T where
+        T: futures::Stream<Item = Result<super::Token, super::TokenError>> + Send
+    {
+    }
+}
+/// Utility methods for token stream sources.
+pub trait TokenStreamExt: sealed::TokenStreamExtSealed {
+    /// Converts the stream of tokens into a single string future. This is useful for
+    /// when you don't want to filter the tokens as they arrive.
+    fn all_tokens(self) -> impl std::future::Future<Output = Result<String, TokenError>> + Send;
+}
+impl<T> TokenStreamExt for T
+where
+    T: sealed::TokenStreamExtSealed + futures::Stream<Item = Result<Token, TokenError>> + Send,
+{
+    async fn all_tokens(self) -> Result<String, TokenError> {
+        use futures::StreamExt;
+        self.fold(Ok(String::new()), |acc, token| async {
+            let mut acc = acc?;
+            acc.push_str(&token?.0);
+            Ok(acc)
+        })
+        .await
+    }
+}
+
 #[derive(Debug)]
 pub struct Token(pub String);
 

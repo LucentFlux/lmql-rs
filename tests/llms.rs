@@ -14,20 +14,10 @@ async fn anthropic_stream() {
 }
 
 #[tokio::test]
-async fn openai_stream() {
-    let gpt =
-        lmql::llms::openai::Gpt::new_from_env(lmql::llms::openai::GptModel::Gpt4oMini_2024_07_18);
-    let mut stream = gpt.prompt(&["Hello!"], PromptOptions::default()).unwrap();
-    while let Some(token) = stream.next().await {
-        println!("{:?}", token.unwrap());
-    }
-}
-
-#[tokio::test]
 async fn openrouter_stream() {
-    let gpt = lmql::llms::openrouter::OpenRouter::new_from_env("deepseek/deepseek-r1");
-    let mut stream = gpt.prompt(&["Hello!"], PromptOptions::default()).unwrap();
+    let r1 = lmql::llms::openrouter::OpenRouter::new_from_env("deepseek/deepseek-r1");
+    let mut stream = r1.prompt(&["Hello!"], PromptOptions::default()).unwrap();
     while let Some(token) = stream.next().await {
-        println!("{:?}", token.unwrap());
+        print!("{:?}", token.unwrap());
     }
 }

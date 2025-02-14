@@ -2,6 +2,8 @@
 name = "lmql"
 version = "0.1.0"
 edition = "2021"
+description = "A general-purpose async streaming large language model interface"
+license = "MIT"
 
 [dependencies]
 #lmql-macros = { path = "macros" }

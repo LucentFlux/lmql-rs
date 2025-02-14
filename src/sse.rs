@@ -4,6 +4,7 @@
 use std::io::{BufRead, Read};
 use std::sync::Arc;
 
+use futures::StreamExt;
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::{Request, Response};
@@ -31,17 +32,12 @@ pub enum Error {
     JsonError(#[from] serde_json::Error),
 }
 
+type Result<T> = std::result::Result<T, Error>;
+
 pub(crate) struct SseClient {
     _join_handle: tokio::task::JoinHandle<()>,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
-    rx: UnboundedReceiver<Event<SseValue>>,
-}
-
-#[derive(Debug)]
-pub(crate) enum Event<T> {
-    Failed(Error),
-    Message(T),
-    Shutdown,
+    rx: UnboundedReceiver<Result<SseValue>>,
 }
 
 #[derive(Debug)]
@@ -52,8 +48,8 @@ pub(crate) struct SseValue {
 
 async fn receive_events(
     mut res: Response<Incoming>,
-    tx: UnboundedSender<Event<SseValue>>,
-) -> Result<(), Error> {
+    tx: UnboundedSender<Result<SseValue>>,
+) -> Result<()> {
     let mut accumulation = Vec::new();
 
     while let Some(next) = res.frame().await {
@@ -74,20 +70,46 @@ async fn receive_events(
                         std::io::Cursor::new(message_end),
                     );
 
-                    let mut event_header = [0u8; 7];
-                    message.read(&mut event_header)?;
-                    assert_eq!(&event_header, b"event: ");
-
+                    let mut staging = String::new();
+                    let mut data = String::new();
                     let mut event = String::new();
-                    message.read_line(&mut event)?;
-                    event.pop(); // Remove the trailing newline.
+                    loop {
+                        let mut header = [0u8; 4];
+                        if message.read_exact(&mut header).is_err() {
+                            break;
+                        }
 
-                    let mut data_header = [0u8; 6];
-                    message.read(&mut data_header)?;
-                    assert_eq!(&data_header, b"data: ");
+                        match &header {
+                            b"data" => {
+                                // Last 2 bytes
+                                let mut header_colon = [0u8; 2];
+                                message.read_exact(&mut header_colon)?;
+                                assert_eq!(&header_colon, b": ");
 
-                    let value = serde_json::from_reader(message)?;
-                    if let Err(_) = tx.send(Event::Message(SseValue { event, value })) {
+                                message.read_line(&mut data)?;
+                                if data.ends_with('\n') {
+                                    data.pop(); // Remove the trailing newline.
+                                }
+                            }
+                            b"even" => {
+                                // Last 3 bytes
+                                let mut header_colon = [0u8; 3];
+                                message.read_exact(&mut header_colon)?;
+                                assert_eq!(&header_colon, b"t: ");
+
+                                message.read_line(&mut event)?;
+                                if event.ends_with('\n') {
+                                    event.pop(); // Remove the trailing newline.
+                                }
+                            }
+                            _ => {
+                                message.read_line(&mut staging)?;
+                            }
+                        }
+                    }
+
+                    let value = serde_json::from_str(&data)?;
+                    if let Err(_) = tx.send(Ok(SseValue { event, value })) {
                         tracing::error!("stream disconnected prematurely");
                         return Ok(());
                     }
@@ -106,9 +128,9 @@ async fn receive_events(
 
 async fn run_client(
     request: Request<String>,
-    tx: UnboundedSender<Event<SseValue>>,
+    tx: UnboundedSender<Result<SseValue>>,
     shutdown_signal: tokio::sync::oneshot::Receiver<()>,
-) -> Result<(), Error> {
+) -> Result<()> {
     let url = request.uri();
 
     let host = url.host().expect("Url should have a host");
@@ -148,6 +170,14 @@ async fn run_client(
         }
     };
 
+    if !res.status().is_success() {
+        return Err(tokio::io::Error::new(
+            tokio::io::ErrorKind::Other,
+            format!("request failed with status: {}", res.status()),
+        )
+        .into());
+    }
+
     select! {
         _ = receive_events(res, tx) => {
             // Connection was probably closed
@@ -167,9 +197,7 @@ impl SseClient {
         let join_handle = tokio::spawn(async move {
             let tx_clone = tx.clone();
             if let Err(e) = run_client(request, tx_clone, shutdown_signal).await {
-                let _ = tx.send(Event::Failed(e));
-            } else {
-                let _ = tx.send(Event::Shutdown);
+                let _ = tx.send(Err(e));
             }
         });
 
@@ -179,9 +207,16 @@ impl SseClient {
             shutdown: Some(shutdown),
         }
     }
+}
 
-    pub(crate) async fn next(&mut self) -> Event<SseValue> {
-        self.rx.recv().await.unwrap_or(Event::Shutdown)
+impl futures::Stream for SseClient {
+    type Item = Result<SseValue>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.rx.poll_recv(cx)
     }
 }
 

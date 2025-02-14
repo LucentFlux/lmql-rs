@@ -7,12 +7,10 @@ async fn main() {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    let claude = lmql::llms::anthropic::Claude::new_from_env(
-        lmql::llms::anthropic::ClaudeModel::Claude_3_5_Haiku_20241022,
-    );
-    let mut stream = claude
+    let gpt = lmql::llms::openai::Gpt::new_from_env(lmql::llms::openai::GptModel::Gpt4o);
+    let mut stream = gpt
         .prompt(
-            &["Please provide a poem about the moon."],
+            &["What is the molecular formula for hemoglobin?"],
             PromptOptions::default(),
         )
         .unwrap();

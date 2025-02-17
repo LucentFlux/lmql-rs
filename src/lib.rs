@@ -40,25 +40,26 @@ pub enum PromptError {
     TranscodingError(#[from] serde_json::Error),
 }
 
-pub struct PromptOptions {
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
+pub struct PromptOptions<'a> {
     pub max_tokens: usize,
     pub temperature: f32,
-    pub system_prompt: Option<String>,
-    pub stopping_sequences: Vec<String>,
+    pub system_prompt: Option<&'a str>,
+    pub stopping_sequences: &'a [&'a str],
 }
 
-impl Default for PromptOptions {
+impl Default for PromptOptions<'_> {
     fn default() -> Self {
         Self {
             max_tokens: DEFAULT_MAX_TOKENS,
             temperature: DEFAULT_TEMPERATURE,
             system_prompt: None,
-            stopping_sequences: vec![],
+            stopping_sequences: &[],
         }
     }
 }
 
-impl PromptOptions {
+impl<'a> PromptOptions<'a> {
     pub fn set_max_tokens(&mut self, max_tokens: usize) -> &mut Self {
         self.max_tokens = max_tokens;
         self
@@ -67,12 +68,12 @@ impl PromptOptions {
         self.temperature = temperature;
         self
     }
-    pub fn set_system_prompt(&mut self, system_prompt: String) -> &mut Self {
+    pub fn set_system_prompt(&mut self, system_prompt: &'a str) -> &mut Self {
         self.system_prompt = Some(system_prompt);
         self
     }
-    pub fn add_stopping_sequence(&mut self, stopping_sequence: String) -> &mut Self {
-        self.stopping_sequences.push(stopping_sequence);
+    pub fn set_stopping_sequences(&mut self, stopping_sequences: &'a [&'a str]) -> &mut Self {
+        self.stopping_sequences = stopping_sequences;
         self
     }
 
@@ -82,11 +83,11 @@ impl PromptOptions {
     pub fn temperature(&self) -> f32 {
         self.temperature
     }
-    pub fn system_prompt(&self) -> Option<&String> {
-        self.system_prompt.as_ref()
+    pub fn system_prompt(&self) -> Option<&'a str> {
+        self.system_prompt
     }
-    pub fn stopping_sequences(&self) -> &[String] {
-        &self.stopping_sequences
+    pub fn stopping_sequences(&self) -> &'a [&'a str] {
+        self.stopping_sequences
     }
 }
 

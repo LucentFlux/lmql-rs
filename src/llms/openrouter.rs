@@ -41,20 +41,16 @@ impl crate::LLM for OpenRouter {
             content: &'a str,
         }
 
-        fn is_one(v: &f32) -> bool {
-            *v == 1.0
-        }
-
         #[derive(Debug, serde::Serialize)]
         struct OpenRouterRequest<'a> {
             model: &'a str,
             max_tokens: usize,
-            #[serde(skip_serializing_if = "is_one")]
             temperature: f32,
             stream: bool,
-            #[serde(skip_serializing_if = "Vec::is_empty")]
-            stop: Vec<String>,
+            #[serde(skip_serializing_if = "<[&'a str]>::is_empty")]
+            stop: &'a [&'a str],
             messages: Vec<OpenRouterMessage<'a>>,
+            include_reasoning: bool,
         }
 
         let messages = options
@@ -81,6 +77,7 @@ impl crate::LLM for OpenRouter {
             temperature: options.temperature,
             stop: options.stopping_sequences,
             stream: true,
+            include_reasoning: false,
             messages,
         };
         let body = serde_json::to_string(&body)?;

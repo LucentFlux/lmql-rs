@@ -73,10 +73,10 @@ impl crate::LLM for Claude {
             temperature: f32,
             #[serde(skip_serializing_if = "std::ops::Not::not")]
             stream: bool,
-            #[serde(skip_serializing_if = "Vec::is_empty")]
-            stop_sequences: Vec<String>,
+            #[serde(skip_serializing_if = "<[&'a str]>::is_empty")]
+            stop_sequences: &'a [&'a str],
             #[serde(skip_serializing_if = "Option::is_none")]
-            system_prompt: Option<String>,
+            system_prompt: Option<&'a str>,
             messages: Vec<ClaudeMessage<'a>>,
         }
 

@@ -99,7 +99,7 @@ pub trait LLM {
     /// is either the user or the assistant, starting with the user and alternating.
     fn prompt<'a>(
         &self,
-        prompt: &'a [&'a str],
+        chat: &'a [impl AsRef<str> + 'a],
         options: PromptOptions,
     ) -> Result<Self::TokenStream<'a>, PromptError>;
 }

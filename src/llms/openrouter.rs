@@ -32,7 +32,7 @@ impl crate::LLM for OpenRouter {
 
     fn prompt<'a>(
         &self,
-        prompt: &'a [&'a str],
+        chat: &'a [impl AsRef<str> + 'a],
         options: crate::PromptOptions,
     ) -> Result<OpenRouterTokenStream, crate::PromptError> {
         #[derive(Debug, serde::Serialize)]
@@ -61,12 +61,11 @@ impl crate::LLM for OpenRouter {
                 content,
             })
             .chain(
-                prompt
-                    .iter()
+                chat.iter()
                     .enumerate()
-                    .map(|(i, &content)| OpenRouterMessage {
+                    .map(|(i, content)| OpenRouterMessage {
                         role: if i % 2 == 0 { "user" } else { "assistant" },
-                        content,
+                        content: content.as_ref(),
                     }),
             )
             .collect();

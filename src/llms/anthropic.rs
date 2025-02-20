@@ -52,7 +52,7 @@ impl crate::LLM for Claude {
 
     fn prompt<'a>(
         &self,
-        prompt: &'a [&'a str],
+        chat: &'a [impl AsRef<str> + 'a],
         options: crate::PromptOptions,
     ) -> Result<ClaudeTokenStream, crate::PromptError> {
         #[derive(Debug, serde::Serialize)]
@@ -87,12 +87,12 @@ impl crate::LLM for Claude {
             stop_sequences: options.stopping_sequences,
             system_prompt: options.system_prompt,
             stream: true,
-            messages: prompt
+            messages: chat
                 .iter()
                 .enumerate()
-                .map(|(i, &content)| ClaudeMessage {
+                .map(|(i, content)| ClaudeMessage {
                     role: if i % 2 == 0 { "user" } else { "assistant" },
-                    content,
+                    content: content.as_ref(),
                 })
                 .collect(),
         };

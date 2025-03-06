@@ -169,17 +169,30 @@ async fn run_client(
     });
 
     let work = sender.send_request(request);
-    let res = match tokio::time::timeout(std::time::Duration::from_millis(TIMEOUT_MS), work).await {
-        Ok(result) => result?,
-        Err(_) => {
-            return Err(tokio::io::Error::new(tokio::io::ErrorKind::TimedOut, "Timeout").into())
-        }
-    };
+    let mut res =
+        match tokio::time::timeout(std::time::Duration::from_millis(TIMEOUT_MS), work).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(tokio::io::Error::new(tokio::io::ErrorKind::TimedOut, "Timeout").into())
+            }
+        };
 
-    if !res.status().is_success() {
+    let status = res.status();
+    if !status.is_success() {
+        // Collect bad body
+        let mut bytes = vec![];
+        while let Some(Ok(next)) = res.frame().await {
+            let frame = next;
+            if let Some(chunk) = frame.data_ref() {
+                let chunk = &**chunk;
+                bytes.extend_from_slice(chunk);
+            }
+        }
+        let body = String::from_utf8_lossy(&bytes);
+
         return Err(tokio::io::Error::new(
             tokio::io::ErrorKind::Other,
-            format!("request failed with status: {}", res.status()),
+            format!("request failed with status: {status} - `{body}`"),
         )
         .into());
     }

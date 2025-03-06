@@ -28,13 +28,50 @@ impl OpenRouter {
 }
 
 impl crate::LLM for OpenRouter {
-    type TokenStream<'a> = OpenRouterTokenStream;
+    type TokenStream = super::openai::OpenAITokenStream;
 
-    fn prompt<'a>(
+    fn prompt(
         &self,
-        chat: &'a [impl AsRef<str> + 'a],
-        options: crate::PromptOptions,
-    ) -> Result<OpenRouterTokenStream, crate::PromptError> {
+        chat: &[impl AsRef<str>],
+        options: &crate::PromptOptions,
+    ) -> Result<super::openai::OpenAITokenStream, crate::PromptError> {
+        let crate::PromptOptions {
+            max_tokens,
+            temperature,
+            system_prompt,
+            stopping_sequences,
+            tools,
+            reasoning,
+        } = options;
+
+        #[derive(Debug, serde::Serialize)]
+        enum OpenRouterReasoningEffort {
+            #[serde(rename = "low")]
+            Low,
+            #[serde(rename = "medium")]
+            Medium,
+            #[serde(rename = "high")]
+            High,
+        }
+
+        #[derive(Debug, serde::Serialize)]
+        struct OpenRouterFunctionDescription<'a> {
+            name: &'a str,
+            description: &'a str,
+            parameters: &'a schemars::schema::Schema,
+        }
+
+        #[derive(Debug, serde::Serialize)]
+        struct OpenRouterTool<'a> {
+            r#type: &'a str,
+            function: OpenRouterFunctionDescription<'a>,
+        }
+
+        #[derive(Debug, serde::Serialize)]
+        struct OpenRouterReasoning {
+            effort: OpenRouterReasoningEffort,
+        }
+
         #[derive(Debug, serde::Serialize)]
         struct OpenRouterMessage<'a> {
             role: &'a str,
@@ -47,14 +84,26 @@ impl crate::LLM for OpenRouter {
             max_tokens: usize,
             temperature: f32,
             stream: bool,
-            #[serde(skip_serializing_if = "<[&'a str]>::is_empty")]
-            stop: &'a [&'a str],
+            #[serde(skip_serializing_if = "<[String]>::is_empty")]
+            stop: &'a [String],
+            tools: Vec<OpenRouterTool<'a>>,
+            reasoning: Option<OpenRouterReasoning>,
             messages: Vec<OpenRouterMessage<'a>>,
-            include_reasoning: bool,
         }
 
-        let messages = options
-            .system_prompt
+        let tools = tools
+            .iter()
+            .map(|tool| OpenRouterTool {
+                r#type: "function",
+                function: OpenRouterFunctionDescription {
+                    name: &tool.name,
+                    description: &tool.description,
+                    parameters: &tool.parameters.inner,
+                },
+            })
+            .collect();
+
+        let messages = system_prompt
             .iter()
             .map(|content| OpenRouterMessage {
                 role: "system",
@@ -72,11 +121,18 @@ impl crate::LLM for OpenRouter {
 
         let body = OpenRouterRequest {
             model: &self.model,
-            max_tokens: options.max_tokens,
-            temperature: options.temperature,
-            stop: options.stopping_sequences,
+            max_tokens: *max_tokens,
+            temperature: *temperature,
+            stop: stopping_sequences.as_slice(),
             stream: true,
-            include_reasoning: false,
+            tools,
+            reasoning: reasoning.map(|effort| OpenRouterReasoning {
+                effort: match effort {
+                    crate::ReasoningEffort::Low => OpenRouterReasoningEffort::Low,
+                    crate::ReasoningEffort::Medium => OpenRouterReasoningEffort::Medium,
+                    crate::ReasoningEffort::High => OpenRouterReasoningEffort::High,
+                },
+            }),
             messages,
         };
         let body = serde_json::to_string(&body)?;
@@ -92,121 +148,8 @@ impl crate::LLM for OpenRouter {
         tracing::debug!("OpenRouter request: {:#?}", request);
         let sse = SseClient::spawn(request);
 
-        Ok(OpenRouterTokenStream {
+        Ok(super::openai::OpenAITokenStream {
             stream: Some(Box::pin(sse)),
         })
-    }
-}
-
-pub struct OpenRouterTokenStream {
-    stream: Option<std::pin::Pin<Box<SseClient>>>,
-}
-
-impl futures::Stream for OpenRouterTokenStream {
-    type Item = Result<crate::Token, crate::TokenError>;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        loop {
-            let Some(stream) = self.stream.as_mut() else {
-                return std::task::Poll::Ready(None);
-            };
-
-            let message = stream.as_mut().poll_next(cx);
-
-            let message = match message {
-                std::task::Poll::Ready(None) => {
-                    self.stream = None;
-                    return std::task::Poll::Ready(None);
-                }
-                std::task::Poll::Ready(Some(message)) => message,
-                std::task::Poll::Pending => return std::task::Poll::Pending,
-            };
-
-            let mut message = match message {
-                Err(error) => {
-                    self.stream = None;
-                    return std::task::Poll::Ready(Some(Err(crate::TokenError::ConnectionLost(
-                        error,
-                    ))));
-                }
-                Ok(message) => message,
-            };
-
-            match message.event.as_str() {
-                "ping" => {}
-                "" => {
-                    let content = message.value.as_object_mut().expect("message is an object");
-
-                    let Some(serde_json::Value::String(object)) = content.get("object") else {
-                        tracing::error!(
-                            "expected OpenRouter data to have object: {:#?}",
-                            message.value
-                        );
-                        continue;
-                    };
-
-                    match object.as_str() {
-                        "chat.completion.chunk" => {
-                            let Some(serde_json::Value::Array(choices)) =
-                                content.get_mut("choices")
-                            else {
-                                tracing::error!(
-                                    "expected OpenRouter chat completion chunk to have choices: {:#?}",
-                                    message.value
-                                );
-                                continue;
-                            };
-
-                            if choices.len() != 1 {
-                                tracing::error!(
-                                    "expected OpenRouter chat completion chunk to have exactly one choice: {:#?}",
-                                    message.value
-                                );
-                                continue;
-                            }
-
-                            let Some(serde_json::Value::Object(choice)) = choices.get_mut(0) else {
-                                tracing::error!(
-                                    "expected OpenRouter chat completion chunk to have at least one choice: {:#?}",
-                                    message.value
-                                );
-                                continue;
-                            };
-
-                            let Some(serde_json::Value::Object(delta)) = choice.get_mut("delta")
-                            else {
-                                tracing::error!(
-                                    "expected OpenRouter chat completion chunk to have delta: {:#?}",
-                                    message.value
-                                );
-                                continue;
-                            };
-
-                            let Some(serde_json::Value::String(text)) = delta.remove("content")
-                            else {
-                                tracing::error!(
-                                    "expected OpenRouter chat completion chunk to have content: {:#?}",
-                                    message.value
-                                );
-                                continue;
-                            };
-
-                            return std::task::Poll::Ready(Some(Ok(crate::Token(text))));
-                        }
-                        other => tracing::error!(
-                            "unexpected OpenRouter object: `{other}` with value {:#?}",
-                            content
-                        ),
-                    }
-                }
-                other => tracing::error!(
-                    "unexpected OpenRouter event: `{other}` with value {:#?}",
-                    message.value
-                ),
-            }
-        }
     }
 }

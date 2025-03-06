@@ -1,6 +1,6 @@
 use hyper::{Method, Request, Version};
 
-use crate::sse::SseClient;
+use crate::{sse::SseClient, JsonExt};
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -55,6 +55,24 @@ impl GptModel {
             | Self::o1Preview_2024_09_12 => "developer",
         }
     }
+
+    fn supports_temperature(&self) -> bool {
+        match self {
+            Self::Gpt4o
+            | Self::Gpt4o_2024_08_06
+            | Self::ChatGpt4oLatest
+            | Self::Gpt4oMini_2024_07_18
+            | Self::Gpt4oMini => true,
+            Self::o1
+            | Self::o1_2024_12_17
+            | Self::o1Mini
+            | Self::o1Mini_2024_09_12
+            | Self::o3Mini
+            | Self::o3Mini_2025_01_31
+            | Self::o1Preview
+            | Self::o1Preview_2024_09_12 => false,
+        }
+    }
 }
 
 pub struct Gpt {
@@ -80,46 +98,103 @@ impl Gpt {
 }
 
 impl crate::LLM for Gpt {
-    type TokenStream<'a> = GptTokenStream;
+    type TokenStream = OpenAITokenStream;
 
-    fn prompt<'a>(
+    fn prompt(
         &self,
-        prompt: &'a [&'a str],
-        options: crate::PromptOptions,
-    ) -> Result<GptTokenStream, crate::PromptError> {
+        chat: &[impl AsRef<str>],
+        options: &crate::PromptOptions,
+    ) -> Result<OpenAITokenStream, crate::PromptError> {
+        let crate::PromptOptions {
+            max_tokens,
+            temperature,
+            system_prompt,
+            stopping_sequences,
+            tools,
+            reasoning,
+        } = options;
+
         #[derive(Debug, serde::Serialize)]
-        struct GptMessage<'a> {
+        enum OpenAIReasoningEffort {
+            #[serde(rename = "low")]
+            Low,
+            #[serde(rename = "medium")]
+            Medium,
+            #[serde(rename = "high")]
+            High,
+        }
+
+        #[derive(Debug, serde::Serialize)]
+        struct OpenAIFunctionDescription<'a> {
+            name: &'a str,
+            description: &'a str,
+            parameters: &'a schemars::schema::Schema,
+        }
+
+        #[derive(Debug, serde::Serialize)]
+        struct OpenAITool<'a> {
+            r#type: &'a str,
+            function: OpenAIFunctionDescription<'a>,
+        }
+
+        #[derive(Debug, serde::Serialize)]
+        struct OpenAIMessage<'a> {
             role: &'a str,
             content: &'a str,
         }
 
         #[derive(Debug, serde::Serialize)]
-        struct GptRequest<'a> {
+        struct OpenAIRequest<'a> {
             model: GptModel,
-            max_tokens: usize,
-            temperature: f32,
+            max_completion_tokens: usize,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            temperature: Option<f32>,
             stream: bool,
-            messages: Vec<GptMessage<'a>>,
+            #[serde(skip_serializing_if = "<[String]>::is_empty")]
+            stop: &'a [String],
+            #[serde(skip_serializing_if = "Option::is_none")]
+            reasoning_effort: Option<OpenAIReasoningEffort>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            tools: Vec<OpenAITool<'a>>,
+            messages: Vec<OpenAIMessage<'a>>,
         }
 
-        let messages = options
-            .system_prompt
+        let tools = tools
             .iter()
-            .map(|content| GptMessage {
-                role: self.model.system_name(),
+            .map(|tool| OpenAITool {
+                r#type: "function",
+                function: OpenAIFunctionDescription {
+                    name: &tool.name,
+                    description: &tool.description,
+                    parameters: &tool.parameters.inner,
+                },
+            })
+            .collect();
+
+        let messages = system_prompt
+            .iter()
+            .map(|content| OpenAIMessage {
+                role: &self.model.system_name(),
                 content,
             })
-            .chain(prompt.iter().enumerate().map(|(i, &content)| GptMessage {
+            .chain(chat.iter().enumerate().map(|(i, content)| OpenAIMessage {
                 role: if i % 2 == 0 { "user" } else { "assistant" },
-                content,
+                content: content.as_ref(),
             }))
             .collect();
 
-        let body = GptRequest {
+        let body = OpenAIRequest {
             model: self.model,
-            max_tokens: options.max_tokens,
-            temperature: options.temperature,
+            max_completion_tokens: *max_tokens,
+            temperature: self.model.supports_temperature().then_some(*temperature),
+            stop: stopping_sequences.as_slice(),
             stream: true,
+            reasoning_effort: reasoning.map(|effort| match effort {
+                crate::ReasoningEffort::Low => OpenAIReasoningEffort::Low,
+                crate::ReasoningEffort::Medium => OpenAIReasoningEffort::Medium,
+                crate::ReasoningEffort::High => OpenAIReasoningEffort::High,
+            }),
+            tools,
             messages,
         };
         let body = serde_json::to_string(&body)?;
@@ -135,18 +210,18 @@ impl crate::LLM for Gpt {
         tracing::debug!("OpenAI request: {:#?}", request);
         let sse = SseClient::spawn(request);
 
-        Ok(GptTokenStream {
+        Ok(OpenAITokenStream {
             stream: Some(Box::pin(sse)),
         })
     }
 }
 
-pub struct GptTokenStream {
-    stream: Option<std::pin::Pin<Box<SseClient>>>,
+pub struct OpenAITokenStream {
+    pub(super) stream: Option<std::pin::Pin<Box<SseClient>>>,
 }
 
-impl futures::Stream for GptTokenStream {
-    type Item = Result<crate::Token, crate::TokenError>;
+impl futures::Stream for OpenAITokenStream {
+    type Item = Result<crate::Chunk, crate::TokenError>;
 
     fn poll_next(
         mut self: std::pin::Pin<&mut Self>,
@@ -180,56 +255,137 @@ impl futures::Stream for GptTokenStream {
 
             match message.event.as_str() {
                 "ping" => {}
-                "message_start" => { /* pass */ }
-                "content_block_start" => {
-                    let content = message
-                        .value
-                        .as_object_mut()
-                        .expect("content block start is an object")
-                        .get_mut("content_block")
-                        .expect("content block start has content block")
-                        .as_object_mut()
-                        .expect("content block is an object");
-                    assert_eq!(
-                        content.get("type"),
-                        Some(&serde_json::Value::String("text".to_string()))
-                    );
-                    let serde_json::Value::String(text) = content
-                        .get_mut("text")
-                        .expect("content block has text")
-                        .take()
-                    else {
-                        panic!("content block text is a string");
+                "" => {
+                    let content = message.value.as_object_mut().expect("message is an object");
+
+                    let Some(serde_json::Value::String(object)) = content.get("object") else {
+                        tracing::error!(
+                            "expected OpenAI data to have object: {:#?}",
+                            message.value
+                        );
+                        continue;
                     };
-                    return std::task::Poll::Ready(Some(Ok(crate::Token(text))));
-                }
-                "content_block_delta" => {
-                    let content = message
-                        .value
-                        .as_object_mut()
-                        .expect("content block delta is an object")
-                        .get_mut("delta")
-                        .expect("content block delta has delta")
-                        .as_object_mut()
-                        .expect("delta is an object");
-                    assert_eq!(
-                        content.get("type"),
-                        Some(&serde_json::Value::String("text_delta".to_string()))
-                    );
-                    let serde_json::Value::String(text) =
-                        content.get_mut("text").expect("delta has text").take()
-                    else {
-                        panic!("delta text is a string");
-                    };
-                    return std::task::Poll::Ready(Some(Ok(crate::Token(text))));
-                }
-                "content_block_stop" | "message_delta" => { /* pass */ }
-                "message_stop" => {
-                    self.stream = None;
-                    return std::task::Poll::Ready(None);
+
+                    match object.as_str() {
+                        "chat.completion.chunk" => {
+                            let Some(serde_json::Value::Array(choices)) =
+                                content.get_mut("choices")
+                            else {
+                                tracing::error!(
+                                    "expected OpenAI chat completion chunk to have choices: {:#?}",
+                                    message.value
+                                );
+                                continue;
+                            };
+
+                            if choices.len() != 1 {
+                                tracing::error!(
+                                    "expected OpenAI chat completion chunk to have exactly one choice: {:#?}",
+                                    message.value
+                                );
+                                continue;
+                            }
+
+                            let Some(serde_json::Value::Object(choice)) = choices.get_mut(0) else {
+                                tracing::error!(
+                                    "expected OpenAI chat completion chunk to have at least one choice: {:#?}",
+                                    message.value
+                                );
+                                continue;
+                            };
+
+                            let Some(serde_json::Value::Object(delta)) = choice.get_mut("delta")
+                            else {
+                                tracing::error!(
+                                    "expected OpenAI chat completion chunk to have delta: {:#?}",
+                                    message.value
+                                );
+                                continue;
+                            };
+
+                            if let Some(serde_json::Value::String(text)) = delta.remove("content") {
+                                if text.is_empty() {
+                                    continue;
+                                }
+
+                                return std::task::Poll::Ready(Some(Ok(crate::Chunk::Token(text))));
+                            };
+
+                            if let Some(serde_json::Value::Array(mut tool_calls)) =
+                                delta.remove("tool_calls")
+                            {
+                                if tool_calls.len() != 1 {
+                                    unimplemented!(
+                                        "expected OpenAI chat completion chunk to have exactly one tool call: {:#?}",
+                                        message.value
+                                    );
+                                }
+                                let serde_json::Value::Object(mut tool_call) = tool_calls[0].take()
+                                else {
+                                    tracing::error!(
+                                        "expected tool call to be an object: {:#?}",
+                                        message.value
+                                    );
+                                    continue;
+                                };
+                                if let Some(serde_json::Value::String(ty)) =
+                                    tool_call.remove("type")
+                                {
+                                    if ty != "function" {
+                                        unimplemented!("non-tool function calls are unsupported");
+                                    }
+                                }
+
+                                let Some(serde_json::Value::Object(mut function)) =
+                                    tool_call.remove("function")
+                                else {
+                                    tracing::error!(
+                                        "expected tool call to have object function: {:#?}",
+                                        message.value
+                                    );
+                                    continue;
+                                };
+
+                                let id = tool_call
+                                    .remove("id")
+                                    .and_then(|mut v| v.take_str())
+                                    .and_then(|v| (!v.is_empty()).then_some(v));
+
+                                let name = function
+                                    .remove("name")
+                                    .and_then(|mut v| v.take_str())
+                                    .and_then(|v| (!v.is_empty()).then_some(v));
+                                let Some(arguments) =
+                                    function.remove("arguments").and_then(|mut v| v.take_str())
+                                else {
+                                    tracing::error!(
+                                        "expected tool call to have arguments: {:#?}",
+                                        message.value
+                                    );
+                                    continue;
+                                };
+                                return std::task::Poll::Ready(Some(Ok(crate::Chunk::ToolCall(
+                                    crate::ToolCallChunk {
+                                        id,
+                                        name,
+                                        arguments,
+                                    },
+                                ))));
+                            };
+
+                            tracing::error!(
+                                    "expected OpenAI chat completion chunk delta to have known key: {:#?}",
+                                    message.value
+                                );
+                        }
+                        other => tracing::error!(
+                            "unexpected OpenAI object: `{other}` with value {:#?}",
+                            content
+                        ),
+                    }
                 }
                 other => tracing::error!(
-                    "unexpected openai event: `{other}` with value {:#?}",
+                    "unexpected OpenAI event: `{other}` with value {:#?}",
                     message.value
                 ),
             }

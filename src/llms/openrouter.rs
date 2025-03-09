@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{borrow::Cow, fmt::Display};
 
 use hyper::{Method, Request, Version};
 
@@ -32,7 +32,7 @@ impl crate::LLM for OpenRouter {
 
     fn prompt(
         &self,
-        chat: &[impl AsRef<str>],
+        chat: &[crate::Message],
         options: &crate::PromptOptions,
     ) -> Result<super::openai::OpenAITokenStream, crate::PromptError> {
         let crate::PromptOptions {
@@ -73,9 +73,38 @@ impl crate::LLM for OpenRouter {
         }
 
         #[derive(Debug, serde::Serialize)]
+        struct OpenRouterToolCallFunction<'a> {
+            name: &'a str,
+            arguments: &'a str,
+        }
+
+        #[derive(Debug, serde::Serialize)]
+        struct OpenRouterToolCall<'a> {
+            id: &'a str,
+            r#type: &'a str,
+            function: OpenRouterToolCallFunction<'a>,
+        }
+
+        #[derive(Debug, serde::Serialize)]
         struct OpenRouterMessage<'a> {
             role: &'a str,
-            content: &'a str,
+            #[serde(skip_serializing_if = "str::is_empty")]
+            content: Cow<'a, str>,
+            #[serde(skip_serializing_if = "str::is_empty")]
+            tool_call_id: &'a str,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            tool_calls: Vec<OpenRouterToolCall<'a>>,
+        }
+
+        impl Default for OpenRouterMessage<'_> {
+            fn default() -> Self {
+                Self {
+                    role: "",
+                    content: Cow::Borrowed(""),
+                    tool_call_id: "",
+                    tool_calls: vec![],
+                }
+            }
         }
 
         #[derive(Debug, serde::Serialize)]
@@ -103,21 +132,102 @@ impl crate::LLM for OpenRouter {
             })
             .collect();
 
-        let messages = system_prompt
-            .iter()
-            .map(|content| OpenRouterMessage {
+        let mut messages = vec![];
+        if let Some(system_prompt) = system_prompt {
+            messages.push(OpenRouterMessage {
                 role: "system",
-                content,
-            })
-            .chain(
-                chat.iter()
-                    .enumerate()
-                    .map(|(i, content)| OpenRouterMessage {
-                        role: if i % 2 == 0 { "user" } else { "assistant" },
-                        content: content.as_ref(),
-                    }),
-            )
-            .collect();
+                content: Cow::Borrowed(system_prompt),
+                ..OpenRouterMessage::default()
+            });
+        }
+
+        fn add_message<'a>(messages: &mut Vec<OpenRouterMessage<'a>>, message: &'a crate::Message) {
+            let new_message = match message {
+                crate::Message::User(content) => {
+                    // Try collate
+                    if let Some(last) = messages.last_mut() {
+                        if last.role == "user" {
+                            if !last.content.is_empty() {
+                                last.content =
+                                    Cow::Owned(format!("{}\n\n{}", last.content, content));
+                            } else {
+                                last.content = Cow::Borrowed(content);
+                            }
+
+                            return;
+                        }
+                    }
+
+                    OpenRouterMessage {
+                        role: "user",
+                        content: Cow::Borrowed(content),
+                        ..OpenRouterMessage::default()
+                    }
+                }
+                crate::Message::Assistant(content) => {
+                    // Try collate
+                    if let Some(last) = messages.last_mut() {
+                        if last.role == "assistant" {
+                            if !last.content.is_empty() {
+                                last.content =
+                                    Cow::Owned(format!("{}\n\n{}", last.content, content));
+                            } else {
+                                last.content = Cow::Borrowed(content);
+                            }
+
+                            return;
+                        }
+                    }
+
+                    OpenRouterMessage {
+                        role: "assistant",
+                        content: Cow::Borrowed(content),
+                        ..OpenRouterMessage::default()
+                    }
+                }
+                crate::Message::ToolRequest {
+                    id,
+                    name,
+                    arguments,
+                } => {
+                    let tool_request = OpenRouterToolCall {
+                        id: &id,
+                        r#type: "function",
+                        function: OpenRouterToolCallFunction {
+                            name,
+                            arguments: &arguments.0,
+                        },
+                    };
+
+                    // Try collate
+                    if let Some(last) = messages.last_mut() {
+                        if last.role == "assistant" {
+                            last.tool_calls.push(tool_request);
+
+                            return;
+                        }
+                    }
+
+                    OpenRouterMessage {
+                        role: "assistant",
+                        tool_calls: vec![tool_request],
+                        ..OpenRouterMessage::default()
+                    }
+                }
+                crate::Message::ToolResponse { content, id } => OpenRouterMessage {
+                    role: "tool",
+                    content: Cow::Borrowed(content),
+                    tool_call_id: &id,
+                    ..OpenRouterMessage::default()
+                },
+            };
+
+            messages.push(new_message);
+        }
+
+        for message in chat.iter() {
+            add_message(&mut messages, message);
+        }
 
         let body = OpenRouterRequest {
             model: &self.model,
@@ -148,8 +258,6 @@ impl crate::LLM for OpenRouter {
         tracing::debug!("OpenRouter request: {:#?}", request);
         let sse = SseClient::spawn(request);
 
-        Ok(super::openai::OpenAITokenStream {
-            stream: Some(Box::pin(sse)),
-        })
+        Ok(super::openai::OpenAITokenStream::new(sse))
     }
 }

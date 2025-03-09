@@ -35,7 +35,12 @@ pub fn setup() {
 }
 
 pub async fn stream(llm: impl lmql::LLM) {
-    let stream = llm.prompt(&["Hello!"], &PromptOptions::default()).unwrap();
+    let stream = llm
+        .prompt(
+            &[lmql::Message::User("Hello!".into())],
+            &PromptOptions::default(),
+        )
+        .unwrap();
     let response = stream.all_tokens().await.unwrap();
     assert_eq!(response.len(), 1, "{response:?}");
     assert!(matches!(&response[0], lmql::Chunk::Token(text) if text.len() > 1));
@@ -44,7 +49,9 @@ pub async fn stream(llm: impl lmql::LLM) {
 pub async fn reasoning(llm: impl lmql::LLM) {
     let stream = llm
         .prompt(
-            &["How many atoms of iron are in a molecule of hemoglobin?"],
+            &[lmql::Message::User(
+                "How many atoms of iron are in a molecule of hemoglobin?".into(),
+            )],
             &PromptOptions {
                 reasoning: Some(lmql::ReasoningEffort::Low),
                 temperature: 0.0,
@@ -81,7 +88,9 @@ pub async fn tool(llm: impl lmql::LLM) {
     It will not provide any other information about the stock or company.".to_string();
     let stream = llm
         .prompt(
-            &["What is the current price of AAPL?"],
+            &[lmql::Message::User(
+                "What is the current price of AAPL?".into(),
+            )],
             &PromptOptions {
                 tools: vec![lmql::Tool {
                     name: "get_stock_price".to_string(),

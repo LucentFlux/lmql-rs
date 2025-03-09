@@ -144,6 +144,30 @@ impl PromptOptions {
     }
 }
 
+/// Some `serde_json::Value` that has been serialized to a string.
+pub struct SerializedJson(String);
+
+impl SerializedJson {
+    /// Serialization can fail if T's implementation of Serialize decides to fail, or if T contains a map with non-string keys.
+    pub fn try_new(value: serde_json::Value) -> serde_json::Result<Self> {
+        Ok(Self(serde_json::to_string(&value)?))
+    }
+}
+
+pub enum Message {
+    User(String),
+    Assistant(String),
+    ToolRequest {
+        id: String,
+        name: String,
+        arguments: SerializedJson,
+    },
+    ToolResponse {
+        content: String,
+        id: String,
+    },
+}
+
 /// Some hook into an LLM, which can be used to generate text.
 pub trait LLM {
     type TokenStream: futures::Stream<Item = Result<Chunk, TokenError>> + Send;
@@ -152,7 +176,7 @@ pub trait LLM {
     /// is either the user or the assistant, starting with the user and alternating.
     fn prompt(
         &self,
-        chat: &[impl AsRef<str>],
+        messages: &[Message],
         options: &PromptOptions,
     ) -> Result<Self::TokenStream, PromptError>;
 }
@@ -225,6 +249,13 @@ pub enum Chunk {
 pub enum TokenError {
     #[error("the connection was lost")]
     ConnectionLost(#[from] sse::Error),
+    #[error("the server responded with an unknown event type `{0}`")]
+    UnknownEventType(String),
+    #[error("the server responded with unexpected data: {message}")]
+    MalformedResponse {
+        message: &'static str,
+        value: serde_json::Value,
+    },
 }
 
 pub use schemars::JsonSchema;

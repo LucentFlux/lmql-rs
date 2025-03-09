@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use hyper::{Method, Request, Version};
 
 use crate::{sse::SseClient, JsonExt};
@@ -59,7 +61,7 @@ impl crate::LLM for Claude {
 
     fn prompt(
         &self,
-        chat: &[impl AsRef<str>],
+        chat: &[crate::Message],
         options: &crate::PromptOptions,
     ) -> Result<ClaudeTokenStream, crate::PromptError> {
         let crate::PromptOptions {
@@ -89,9 +91,31 @@ impl crate::LLM for Claude {
         }
 
         #[derive(Debug, serde::Serialize)]
+        struct ClaudeMessageContent<'a> {
+            r#type: &'static str,
+            #[serde(skip_serializing_if = "str::is_empty")]
+            text: Cow<'a, str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            tool_use_id: Option<&'a str>,
+            #[serde(skip_serializing_if = "str::is_empty")]
+            content: Cow<'a, str>,
+        }
+
+        impl Default for ClaudeMessageContent<'_> {
+            fn default() -> Self {
+                Self {
+                    r#type: "",
+                    text: Cow::Borrowed(""),
+                    tool_use_id: None,
+                    content: Cow::Borrowed(""),
+                }
+            }
+        }
+
+        #[derive(Debug, serde::Serialize)]
         struct ClaudeMessage<'a> {
             role: &'a str,
-            content: &'a str,
+            content: Vec<ClaudeMessageContent<'a>>,
         }
 
         #[derive(Debug, serde::Serialize)]
@@ -111,6 +135,66 @@ impl crate::LLM for Claude {
             #[serde(skip_serializing_if = "Vec::is_empty")]
             tools: Vec<ClaudeTool<'a>>,
             messages: Vec<ClaudeMessage<'a>>,
+        }
+
+        let mut messages: Vec<ClaudeMessage> = vec![];
+        fn maybe_append_text<'a>(
+            messages: &mut Vec<ClaudeMessage<'a>>,
+            content: &'a str,
+            role: &'a str,
+        ) -> Option<ClaudeMessage<'a>> {
+            let content_part = ClaudeMessageContent {
+                r#type: "text",
+                text: Cow::Borrowed(content),
+                ..ClaudeMessageContent::default()
+            };
+
+            // Try collate
+            if let Some(last) = messages.last_mut() {
+                if last.role == role {
+                    if let Some(last_content) = last.content.last_mut() {
+                        if last_content.r#type == "text" {
+                            last_content.text =
+                                Cow::Owned(format!("{}\n\n{}", last_content.text, content));
+                            return None;
+                        }
+                    }
+
+                    last.content.push(content_part);
+
+                    return None;
+                }
+            }
+
+            Some(ClaudeMessage {
+                role,
+                content: vec![content_part],
+            })
+        }
+
+        for message in chat {
+            let new_message = match message {
+                crate::Message::User(content) => {
+                    let Some(message) = maybe_append_text(&mut messages, content, "user") else {
+                        continue;
+                    };
+                    message
+                }
+                crate::Message::Assistant(content) => {
+                    let Some(message) = maybe_append_text(&mut messages, content, "assistant")
+                    else {
+                        continue;
+                    };
+                    message
+                }
+                crate::Message::ToolRequest {
+                    id,
+                    name,
+                    arguments,
+                } => todo!(),
+                crate::Message::ToolResponse { content, id } => todo!(),
+            };
+            messages.push(new_message);
         }
 
         let tools = tools
@@ -138,14 +222,7 @@ impl crate::LLM for Claude {
                 budget_tokens: level.max_tokens(),
             }),
             tools,
-            messages: chat
-                .iter()
-                .enumerate()
-                .map(|(i, content)| ClaudeMessage {
-                    role: if i % 2 == 0 { "user" } else { "assistant" },
-                    content: content.as_ref(),
-                })
-                .collect(),
+            messages,
         };
         let body = serde_json::to_string(&body)?;
         tracing::debug!("Claude request body: {}", body);

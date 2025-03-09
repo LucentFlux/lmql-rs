@@ -231,18 +231,35 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ToolCallChunk {
     pub id: Option<String>,
     pub name: Option<String>,
     pub arguments: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Chunk {
     Token(String),
     Thinking(String),
     ToolCall(ToolCallChunk),
+}
+
+impl Chunk {
+    pub fn try_into_message(self) -> Option<Message> {
+        match self {
+            Chunk::Token(content) => Some(Message::Assistant(content)),
+            Chunk::Thinking(_) => None,
+            Chunk::ToolCall(tool_call_chunk) => Some(Message::ToolRequest {
+                id: tool_call_chunk.id?,
+                name: tool_call_chunk.name?,
+                arguments: SerializedJson::try_new(
+                    serde_json::from_str::<serde_json::Value>(&tool_call_chunk.arguments).ok()?,
+                )
+                .ok()?,
+            }),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

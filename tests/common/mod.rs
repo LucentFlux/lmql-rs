@@ -86,12 +86,7 @@ pub async fn tool(llm: impl lmql::LLM) {
     The tool will return the latest trade price in USD.
     It should be used when the user asks about the current or most recent price of a specific stock.
     It will not provide any other information about the stock or company.".to_string();
-    let stream = llm
-        .prompt(
-            &[lmql::Message::User(
-                "What is the current price of AAPL?".into(),
-            )],
-            &PromptOptions {
+    let options = PromptOptions {
                 tools: vec![lmql::Tool {
                     name: "get_stock_price".to_string(),
                     description,
@@ -105,11 +100,20 @@ pub async fn tool(llm: impl lmql::LLM) {
                     "banana".to_owned(),
                 ],
                 reasoning: None
-            },
-        )
-        .unwrap();
+            };
+
+    let mut chat = vec![lmql::Message::User(
+        "What is the current price of AAPL?".into(),
+    )];
+    let stream = llm.prompt(&chat, &options).unwrap();
     let mut response = stream.all_tokens().await.unwrap();
     assert!(response.len() <= 2, "{response:?}");
+
+    chat.extend(
+        response
+            .iter()
+            .filter_map(|response| response.clone().try_into_message()),
+    );
 
     if response.len() > 1 {
         let text = response.remove(0);
@@ -117,7 +121,7 @@ pub async fn tool(llm: impl lmql::LLM) {
     }
 
     let lmql::Chunk::ToolCall(lmql::ToolCallChunk {
-        id: _,
+        id,
         name,
         arguments,
     }) = &response[0]
@@ -129,4 +133,16 @@ pub async fn tool(llm: impl lmql::LLM) {
 
     let arguments = serde_json::from_str::<StockPrice>(arguments).unwrap();
     assert_eq!(arguments.ticker, "AAPL");
+
+    chat.push(lmql::Message::ToolResponse {
+        content: "$239.07".to_owned(),
+        id: id
+            .clone()
+            .expect("tool usages must include an ID in at least one chunk"),
+    });
+
+    let stream = llm.prompt(&chat, &options).unwrap();
+    let response = stream.all_tokens().await.unwrap();
+    assert_eq!(response.len(), 1, "{response:?}");
+    assert!(matches!(&response[0], lmql::Chunk::Token(response) if response.len() >= 7));
 }

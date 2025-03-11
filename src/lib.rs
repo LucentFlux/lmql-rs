@@ -145,12 +145,18 @@ impl PromptOptions {
 }
 
 /// Some `serde_json::Value` that has been serialized to a string.
-pub struct SerializedJson(String);
+pub struct SerializedJson {
+    raw: serde_json::Value,
+    serialized: String,
+}
 
 impl SerializedJson {
     /// Serialization can fail if T's implementation of Serialize decides to fail, or if T contains a map with non-string keys.
     pub fn try_new(value: serde_json::Value) -> serde_json::Result<Self> {
-        Ok(Self(serde_json::to_string(&value)?))
+        Ok(Self {
+            serialized: serde_json::to_string(&value)?,
+            raw: value,
+        })
     }
 }
 

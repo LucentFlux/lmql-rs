@@ -93,12 +93,24 @@ impl crate::LLM for Claude {
         #[derive(Debug, serde::Serialize)]
         struct ClaudeMessageContent<'a> {
             r#type: &'static str,
+
+            // For type: text
             #[serde(skip_serializing_if = "str::is_empty")]
             text: Cow<'a, str>,
+
+            // For type: tool_use
+            #[serde(skip_serializing_if = "Option::is_none")]
+            id: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            name: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            input: Option<&'a serde_json::Value>,
+
+            // For type: tool_result
             #[serde(skip_serializing_if = "Option::is_none")]
             tool_use_id: Option<&'a str>,
-            #[serde(skip_serializing_if = "str::is_empty")]
-            content: Cow<'a, str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            content: Option<&'a str>,
         }
 
         impl Default for ClaudeMessageContent<'_> {
@@ -106,8 +118,11 @@ impl crate::LLM for Claude {
                 Self {
                     r#type: "",
                     text: Cow::Borrowed(""),
+                    id: None,
+                    name: None,
+                    input: None,
                     tool_use_id: None,
-                    content: Cow::Borrowed(""),
+                    content: None,
                 }
             }
         }
@@ -143,6 +158,10 @@ impl crate::LLM for Claude {
             content: &'a str,
             role: &'a str,
         ) -> Option<ClaudeMessage<'a>> {
+            if content.is_empty() {
+                return None;
+            }
+
             let content_part = ClaudeMessageContent {
                 r#type: "text",
                 text: Cow::Borrowed(content),
@@ -191,8 +210,47 @@ impl crate::LLM for Claude {
                     id,
                     name,
                     arguments,
-                } => todo!(),
-                crate::Message::ToolResponse { content, id } => todo!(),
+                } => {
+                    let content = ClaudeMessageContent {
+                        r#type: "tool_use",
+                        id: Some(id),
+                        name: Some(name),
+                        input: Some(&arguments.raw),
+                        ..ClaudeMessageContent::default()
+                    };
+
+                    // Try collate
+                    if let Some(last) = messages.last_mut() {
+                        if last.role == "assistant" {
+                            last.content.push(content);
+                            continue;
+                        }
+                    }
+
+                    ClaudeMessage {
+                        role: "assistant",
+                        content: vec![content],
+                    }
+                }
+                crate::Message::ToolResponse { content, id } => {
+                    let content = ClaudeMessageContent {
+                        r#type: "tool_result",
+                        tool_use_id: Some(id),
+                        content: Some(content),
+                        ..ClaudeMessageContent::default()
+                    };
+                    // Try collate
+                    if let Some(last) = messages.last_mut() {
+                        if last.role == "user" {
+                            last.content.push(content);
+                            continue;
+                        }
+                    }
+                    ClaudeMessage {
+                        role: "user",
+                        content: vec![content],
+                    }
+                }
             };
             messages.push(new_message);
         }

@@ -141,49 +141,47 @@ impl crate::LLM for OpenRouter {
             });
         }
 
+        fn try_append_text<'a>(
+            messages: &mut Vec<OpenRouterMessage<'a>>,
+            content: &'a str,
+            role: &'a str,
+        ) -> Option<OpenRouterMessage<'a>> {
+            if content.is_empty() {
+                return None;
+            }
+
+            // Try collate
+            if let Some(last) = messages.last_mut() {
+                if last.role == role {
+                    if !last.content.is_empty() {
+                        last.content = Cow::Owned(format!("{}\n\n{}", last.content, content));
+                    } else {
+                        last.content = Cow::Borrowed(content);
+                    }
+                    return None;
+                }
+            }
+
+            Some(OpenRouterMessage {
+                role,
+                content: Cow::Borrowed(content),
+                ..OpenRouterMessage::default()
+            })
+        }
+
         fn add_message<'a>(messages: &mut Vec<OpenRouterMessage<'a>>, message: &'a crate::Message) {
             let new_message = match message {
                 crate::Message::User(content) => {
-                    // Try collate
-                    if let Some(last) = messages.last_mut() {
-                        if last.role == "user" {
-                            if !last.content.is_empty() {
-                                last.content =
-                                    Cow::Owned(format!("{}\n\n{}", last.content, content));
-                            } else {
-                                last.content = Cow::Borrowed(content);
-                            }
-
-                            return;
-                        }
-                    }
-
-                    OpenRouterMessage {
-                        role: "user",
-                        content: Cow::Borrowed(content),
-                        ..OpenRouterMessage::default()
-                    }
+                    let Some(message) = try_append_text(messages, content, "user") else {
+                        return;
+                    };
+                    message
                 }
                 crate::Message::Assistant(content) => {
-                    // Try collate
-                    if let Some(last) = messages.last_mut() {
-                        if last.role == "assistant" {
-                            if !last.content.is_empty() {
-                                last.content =
-                                    Cow::Owned(format!("{}\n\n{}", last.content, content));
-                            } else {
-                                last.content = Cow::Borrowed(content);
-                            }
-
-                            return;
-                        }
-                    }
-
-                    OpenRouterMessage {
-                        role: "assistant",
-                        content: Cow::Borrowed(content),
-                        ..OpenRouterMessage::default()
-                    }
+                    let Some(message) = try_append_text(messages, content, "assistant") else {
+                        return;
+                    };
+                    message
                 }
                 crate::Message::ToolRequest {
                     id,
@@ -195,7 +193,7 @@ impl crate::LLM for OpenRouter {
                         r#type: "function",
                         function: OpenRouterToolCallFunction {
                             name,
-                            arguments: &arguments.0,
+                            arguments: &arguments.serialized,
                         },
                     };
 

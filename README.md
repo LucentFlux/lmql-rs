@@ -1,43 +1,54 @@
 # lmql-rs
-An LLM programming language inspired by the Python library of the same name
+An typesafe high-level LLM API for Rust, inspired by the Python library of the same name.
 
 ## Features
 
-- [x] Multiple backend support, including Anthropic and OpenRouter
-- [x] Stream-based async API to allow for real-time response
-- [x] Stream cancelling to avoid wasting tokens on a bad response
+- [x] Multiple backend support, including Anthropic, OpenAI and OpenRouter
+- [x] Async and Stream support, with cancelling to avoid wasting tokens on a bad response
+- [x] Tools, with a type-safe interface
 - [ ] Macros for a prompt DSL like the LMQL Python library
 
 ## Usage
 
-```Rust
+```rust
 use futures::StreamExt;
-use lmql::{PromptOptions, Token, LLM};
+use lmql::{PromptOptions, Chunk, Message, LLM};
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::FmtSubscriber::builder()
-        .with_max_level(tracing::Level::INFO)
-        .init();
-
     let claude = lmql::llms::anthropic::Claude::new_from_env(
         lmql::llms::anthropic::ClaudeModel::Claude_3_5_Haiku_20241022,
     );
     let mut stream = claude
         .prompt(
-            &["Please provide a poem about the moon."],
-            PromptOptions::default(),
+            &[Message::User("Please provide a poem about the moon.".into())],
+            &PromptOptions::default(),
         )
         .unwrap();
 
+    // Loop over each token as they arrive
     while let Some(t) = stream.next().await {
-        match t {
-            Ok(Token(t)) => print!("{}", t),
-            Err(e) => {
-                println!("Error from stream: {e:#?}");
-                break;
-            },
+        if let Ok(Chunk::Token(t)) = t {
+            print!("{}", t)
+        } else {
+            panic!("Unexpected chunk: {t:#?}")
         }
     }
+
+    // Or use `lmql::TokenStreamExt` to collect the tokens together
+    let mut stream = claude
+        .prompt(
+            &[Message::User("What is bitcoin?".into())],
+            &PromptOptions::default(),
+        )
+        .unwrap();
+
+    use lmql::TokenStreamExt;
+    let response = stream.all_tokens().await.unwrap();
+    assert_eq!(response.len(), 1);
+    let Chunk::Token(t) = &response[0] else {
+        panic!("Expected only text in response")
+    };
+    println!("{t}");
 }
 ```
